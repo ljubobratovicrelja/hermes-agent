@@ -775,7 +775,8 @@ _DESCRIPTION_DELIVERY = (
     "Otherwise runs in the background: dispatch returns live transcript paths and results re-enter "
     "as a new message when subagents finish{delivery}. Background results are delivered only "
     "BETWEEN your turns: finish whatever does not depend on them, then give a one-line status and END YOUR TURN. Never "
-    "wait or poll on transcripts, artifact files, or CI for a child.\n\n"
+    "wait or poll on transcripts, artifact files, or CI for a child. "
+    "While children run, `action` (list/steer/stop) controls them live.\n\n"
 )
 _ONESHOT_DESCRIPTION_DELIVERY = "Parallel children are joined and their results return in this tool call.\n\n"
 _DESCRIPTION_HEAD = (
