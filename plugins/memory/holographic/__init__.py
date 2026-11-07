@@ -154,12 +154,33 @@ class HolographicMemoryProvider(MemoryProvider):
         return "# Holographic Memory\n" + body + "Use fact_feedback to rate facts after using them (trains trust scores)."
 
     def prefetch(self, query: str, *, session_id: str = "") -> str:
+        """Inject a small, high-score slice of the store into the current turn.
+
+        Unbounded prefetch was the real context tax: five full facts, one of them a 4 KB cron
+        pipeline note, arrived every turn (~2.6k tokens) whether relevant or not. Cap each fact to
+        600 characters, keep at most 4, drop anything scoring under 45% of the top hit, and stop at
+        ~2.4k characters total.
+        """
         if not self._retriever or not query:
             return ""
         try:
-            results = self._retriever.search(query, min_trust=self._min_trust, limit=5)
-            lines = [f"- [{r.get('trust_score', r.get('trust', 0)):.1f}] {r.get('content', '')}" for r in results]
-            return "## Holographic Memory\n" + "\n".join(lines) if results else ""
+            results = self._retriever.search(query, min_trust=self._min_trust, limit=4)
+            if not results:
+                return ""
+            floor = max(0.30, 0.45 * max(r.get("score", 0.0) for r in results))
+            lines, total = [], 0
+            for r in results:
+                if r.get("score", 0.0) < floor:
+                    continue
+                body = r.get("content", "").strip().replace("\n", " ")
+                if len(body) > 600:
+                    body = body[:597].rstrip() + "…"
+                line = f"- [{r.get('trust_score', 0):.1f}] {body}"
+                if total + len(line) > 2400:
+                    break
+                lines.append(line)
+                total += len(line)
+            return "## Holographic Memory\n" + "\n".join(lines) if lines else ""
         except Exception as e:
             logger.debug("Holographic prefetch failed: %s", e)
             return ""
@@ -202,6 +223,13 @@ class HolographicMemoryProvider(MemoryProvider):
     # Tool handlers (self, args) -> str. KeyError from args[...] / Exception -> tool_error in handle_tool_call;
     # argument coercion order (and therefore which error surfaces first) mirrors the underlying call order.
 
+    def _search_tool(self, a: dict) -> str:
+        """fact_store search: run retrieval, then record usage on the surfaced facts."""
+        results = self._retriever.search(a["query"], category=a.get("category"),
+                                         min_trust=float(a.get("min_trust", self._min_trust)), limit=_limit(a))
+        self._store.increment_retrieval([r["fact_id"] for r in results])
+        return _results(results)
+
     def _entity_query(self, method: str, a: dict) -> str:
         """'probe' / 'related': single-entity retriever queries."""
         return _results(getattr(self._retriever, method)(a["entity"], category=a.get("category"), limit=_limit(a)))
@@ -210,8 +238,7 @@ class HolographicMemoryProvider(MemoryProvider):
         "fact_store": _tool_handler({
             "add": lambda self, a: json.dumps({"fact_id": self._store.add_fact(
                 a["content"], category=a.get("category", "general"), tags=a.get("tags", "")), "status": "added"}),
-            "search": lambda self, a: _results(self._retriever.search(
-                a["query"], category=a.get("category"), min_trust=float(a.get("min_trust", self._min_trust)), limit=_limit(a))),
+            "search": lambda self, a: self._search_tool(a),
             "probe": lambda self, a: self._entity_query("probe", a),
             "related": lambda self, a: self._entity_query("related", a),
             "reason": lambda self, a: _results(self._retriever.reason(a["entities"], category=a.get("category"), limit=_limit(a)))

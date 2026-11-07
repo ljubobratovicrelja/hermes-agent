@@ -74,8 +74,23 @@ _HELPFUL_DELTA, _UNHELPFUL_DELTA = 0.05, -0.10
 
 # Entity extraction patterns, applied in order: capitalized multi-word phrases ("John Doe"), double-quoted terms,
 # single-quoted terms, then "X aka Y" (both sides).
-_RE_SINGLE_ENTITY = (re.compile(r'\b([A-Z][a-z]+(?:\s+[A-Z][a-z]+)+)\b'), re.compile(r'"([^"]+)"'), re.compile(r"'([^']+)'"))
+_RE_SINGLE_ENTITY = (re.compile(r'\b([A-Z][a-zA-Z]+(?:\s+[A-Z][a-zA-Z]+){0,3})\b'), re.compile(r'"([^"\n]{2,50})"'))
 _RE_AKA = re.compile(r'(\w+(?:\s+\w+)*)\s+(?:aka|also known as)\s+(\w+(?:\s+\w+)*)', re.IGNORECASE)
+# Single capitalised words that are grammar or dates, not entities. Multi-word phrases bypass this list.
+_ENTITY_STOPWORDS = frozenset("""
+    the a an and or but if then than that this these those there here when where which while
+    no not so as at by for from in into of on onto over to under up with within without
+    i you he she it we they me him her them us my your his its our their
+    is are was were be been being do does did done have has had can could may might must shall should will would
+    jan feb mar apr may jun jul aug sep sept oct nov dec monday tuesday wednesday thursday friday saturday sunday
+    now new next last first same more most all any each both few some other others
+    ok okays yes true false none null tbd todo note notes data status total plan item items
+    project projects repo branch commit issue pr click here see also
+    only full open closed current also however fixed added removed updated today tomorrow yesterday
+    high low medium hard soft first second third fourth final best worst good bad big small
+    cest cet ust pst gmt utc am pm hrs min max average total sum count number one two three
+    january february march april june july august september october november december
+""".split())
 _ENTITY_NAMES_SQL = "SELECT e.name FROM entities e JOIN fact_entities fe ON fe.entity_id = e.entity_id WHERE fe.fact_id = ?"
 # Entity lookup order: exact name, then aliases (comma-separated; wrapped in commas for whole-alias matching).
 _ENTITY_LOOKUPS = ("SELECT entity_id FROM entities WHERE name LIKE ?",
@@ -199,6 +214,22 @@ class MemoryStore:
                    "ORDER BY trust_score DESC LIMIT ?")
             return [dict(r) for r in self._conn.execute(sql, params).fetchall()]
 
+    def increment_retrieval(self, fact_ids: list[int]) -> None:
+        """Record that these facts were surfaced by an explicit fact_store search (usage telemetry).
+
+        Without this the retrieval_count column stayed at 0 for every fact forever, so nothing could
+        ever inform trust or a pruning decision. Best-effort: a failed counter bump must not fail the read.
+        """
+        if not fact_ids:
+            return
+        try:
+            with self._lock:
+                marks = ",".join("?" * len(fact_ids))
+                self._write(f"UPDATE facts SET retrieval_count = retrieval_count + 1 WHERE fact_id IN ({marks})",
+                            list(fact_ids))
+        except Exception:
+            pass
+
     def record_feedback(self, fact_id: int, helpful: bool) -> dict:
         """Adjust trust asymmetrically: helpful -> +0.05 and helpful_count += 1; unhelpful -> -0.10.
         Returns {fact_id, old_trust, new_trust, helpful_count}. Raises KeyError if fact_id is unknown."""
@@ -214,12 +245,20 @@ class MemoryStore:
             return {"fact_id": fact_id, "old_trust": old_trust, "new_trust": new_trust, "helpful_count": row["helpful_count"] + increment}
 
     def _extract_entities(self, text: str) -> list[str]:
-        """Regex entity candidates (see the pattern table), deduplicated case-insensitively in first-seen order."""
+        """Regex entity candidates (see the pattern table), deduplicated case-insensitively in first-seen order.
+
+        Grammar/date stopwords are dropped for single words; multi-word capitalised phrases are kept
+        because 'Pupil Labs Neon' or 'San Vicente Hospital' are real entities even when one token is common.
+        """
         raw = [m.group(1) for pattern in _RE_SINGLE_ENTITY for m in pattern.finditer(text)]
         for m in _RE_AKA.finditer(text):
             raw += [m.group(1), m.group(2)]
         uniq: dict[str, str] = {}  # lower-cased key -> first-seen spelling, insertion-ordered
         for name in filter(None, (n.strip() for n in raw)):
+            if len(name) > 50 or len(name) < 2:
+                continue
+            if " " not in name and (name.lower() in _ENTITY_STOPWORDS or len(name) < 3):
+                continue
             uniq.setdefault(name.lower(), name)
         return list(uniq.values())
 
