@@ -37,9 +37,11 @@ class AdmittingHandler(AsyncMock):
 class _FakeRegistry:
     """Return pre-canned sessions, then None once exhausted."""
 
-    def __init__(self, sessions, consumed=False):
+    def __init__(self, sessions, consumed=False, surfaced=None):
         self._sessions = list(sessions)
         self._consumed = consumed
+        # ``surfaced`` defaults to ``consumed``: a real consumption is always surfaced.
+        self._surfaced = consumed if surfaced is None else surfaced
 
     def get(self, session_id):
         if self._sessions:
@@ -48,6 +50,9 @@ class _FakeRegistry:
 
     def is_completion_consumed(self, session_id):
         return self._consumed
+
+    def is_completion_surfaced(self, session_id):
+        return self._surfaced
 
 
 def _build_runner(monkeypatch, tmp_path, mode: str) -> GatewayRunner:
@@ -239,6 +244,85 @@ async def test_consumed_completion_skips_raw_notification_without_agent_notify(
     await runner._run_process_watcher(_watcher_dict())
 
     adapter.send.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_polled_exit_does_not_wake_an_agent_notify_turn(monkeypatch, tmp_path):
+    """A poll of an already-exited process puts the exit in the model's context.
+
+    ``_completion_consumed`` stays false on that path (poll is read-only by design), so the
+    watcher used to inject a whole duplicate turn after the final answer. Observed live: the
+    notification arrived as a user turn minutes after the reply it repeated.
+    """
+    import tools.process_registry as pr_module
+
+    sessions = [SimpleNamespace(
+        output_buffer="done\n", exited=True, exit_code=0, command="sleep 1; echo done",
+    )]
+    monkeypatch.setattr(
+        pr_module, "process_registry", _FakeRegistry(sessions, consumed=False, surfaced=True)
+    )
+
+    async def _instant_sleep(*_a, **_kw):
+        pass
+    monkeypatch.setattr(asyncio, "sleep", _instant_sleep)
+
+    runner = _build_runner(monkeypatch, tmp_path, "concise")
+    adapter = runner.adapters[Platform.TELEGRAM]
+
+    watcher = _watcher_dict()
+    watcher["notify_on_complete"] = True
+    await runner._run_process_watcher(watcher)
+
+    adapter.handle_message.assert_not_awaited()
+    adapter.send.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_off_mode_silences_agent_notify_wake(monkeypatch, tmp_path):
+    """``off`` must cover notify_on_complete too: no message AND no wake turn."""
+    import tools.process_registry as pr_module
+
+    sessions = [SimpleNamespace(
+        output_buffer="done\n", exited=True, exit_code=0, command="echo done",
+    )]
+    monkeypatch.setattr(
+        pr_module, "process_registry", _FakeRegistry(sessions, consumed=False)
+    )
+
+    async def _instant_sleep(*_a, **_kw):
+        pass
+    monkeypatch.setattr(asyncio, "sleep", _instant_sleep)
+
+    runner = _build_runner(monkeypatch, tmp_path, "off")
+    adapter = runner.adapters[Platform.TELEGRAM]
+
+    watcher = _watcher_dict()
+    watcher["notify_on_complete"] = True
+    await runner._run_process_watcher(watcher)
+
+    adapter.handle_message.assert_not_awaited()
+    adapter.send.assert_not_awaited()
+
+
+def test_completion_event_carries_no_triggering_message_id(monkeypatch, tmp_path):
+    """The synthetic completion is not a user message: no reply anchor, no stale trigger id.
+
+    Stamping the spawn-time id made the harness prepend ``[Triggering message id: …]`` (so the
+    model replied to a minutes-old user message) and anchored the outbound reply to it.
+    """
+    runner = _build_runner(monkeypatch, tmp_path, "concise")
+    watcher = _watcher_dict(thread_id="42")
+    watcher["message_id"] = "777"
+    session = SimpleNamespace(
+        output_buffer="done\n", exited=True, exit_code=0, command="echo done",
+        completion_reason="exited", termination_source="", started_at=1.0,
+    )
+
+    evt = runner._build_process_completion_event(watcher, session, "proc_test")
+
+    assert "message_id" not in evt
+    assert evt["thread_id"] == "42"
 
 
 @pytest.mark.asyncio

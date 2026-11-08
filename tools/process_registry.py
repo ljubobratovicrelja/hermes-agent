@@ -1647,6 +1647,17 @@ class ProcessRegistry(ProcessTerminationMixin, ProcessCheckpointMixin, ProcessOu
         """True once wait/log/kill/acked poll consumed it; keyed by the full id, never a short prefix."""
         return session_id in self._completion_consumed
 
+    def is_completion_surfaced(self, session_id: str) -> bool:
+        """Whether the agent already holds this completion in its context.
+
+        True for a real consumption (wait/log/kill return the output) AND for a poll of an
+        already-exited process: the poll result carries the exit code and output tail, so a
+        gateway watcher waking a fresh turn would only replay what the session already saw.
+        Gateway surfaces use this; the CLI keeps ``is_completion_consumed`` and covers polls
+        with ``_poll_observed`` inside ``_drain_should_skip``.
+        """
+        return self._drain_should_skip(session_id)
+
     def is_session_waiting(self, session_id: str) -> bool:
         """Whether a goal loop (``hermes_cli.goals`` wait barrier) should stay parked on
         this session: still running AND, with ``watch_patterns``, none matched yet (a
