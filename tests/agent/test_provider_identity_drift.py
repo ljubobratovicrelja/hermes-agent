@@ -484,3 +484,63 @@ class TestRuntimePremise:
         # configured name, so the prompt this route builds is accepted by its own probe.
         label = runtime_provider_label(SimpleNamespace(**rt))
         assert label == "qwen-next"
+
+
+class TestNamedCustomRuntimeStampsTheName:
+    """Every return path of the named-custom resolver must carry the configured name.
+
+    The pool-served path (a provider entry with its own key) returned ``provider='custom'`` with
+    no ``requested_provider``.  The main ladder hid it with ``_tag``, but
+    ``gateway.session_worker_construct.route_runtime`` calls the resolver directly for an
+    in-process turn, so the CLI built its prompt announcing ``custom`` for a ``strata-mint``
+    session.  The keyless path always carried the name, which is why only keyed providers showed it.
+    """
+
+    @staticmethod
+    def _resolver(monkeypatch, pool_result):
+        from hermes_cli import runtime_provider_custom as rpc
+
+        class _Rp:
+            def _resolves_to_custom(self, name):
+                return True
+
+            def has_usable_secret(self, value):
+                return False
+
+            def _get_named_custom_provider(self, name, **kwargs):
+                return {"name": name, "base_url": QWEN_URL, "api_key": "k"}
+
+            def _try_resolve_from_custom_pool(self, *args, **kwargs):
+                return dict(pool_result) if pool_result else None
+
+            def _get_model_config(self):
+                return {}
+
+            def _detect_api_mode_for_url(self, url):
+                return "chat_completions"
+
+            def _runtime(self, provider, api_mode, base_url, api_key, **extra):
+                return {"provider": provider, "api_mode": api_mode, "base_url": base_url,
+                        "api_key": api_key, **extra}
+
+        monkeypatch.setattr(rpc, "_rp", lambda: _Rp())
+        monkeypatch.setattr(rpc, "_apply_custom_provider_extras", lambda *a, **k: None)
+        return rpc._resolve_named_custom_runtime
+
+    def test_pool_served_runtime_carries_the_configured_name(self, monkeypatch):
+        resolve = self._resolver(monkeypatch, {
+            "provider": "custom", "api_key": "k", "base_url": QWEN_URL,
+            "source": "pool:custom:qwen-next",
+        })
+
+        runtime = resolve(requested_provider="qwen-next")
+
+        assert runtime["provider"] == "custom"
+        assert runtime["requested_provider"] == "qwen-next"
+
+    def test_keyless_runtime_still_carries_the_name(self, monkeypatch):
+        resolve = self._resolver(monkeypatch, None)
+
+        runtime = resolve(requested_provider="qwen-next")
+
+        assert runtime["requested_provider"] == "qwen-next"

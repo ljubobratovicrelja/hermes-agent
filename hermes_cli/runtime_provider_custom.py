@@ -902,6 +902,11 @@ def _resolve_named_custom_runtime(*, requested_provider: str, explicit_api_key: 
     if pool_result:
         # The pool doesn't know the custom_providers fields — propagate them here too.
         _apply_custom_provider_extras(custom_provider, target_model, pool_result)
+        # Stamp the configured name like the non-pool return below: the main ladder adds it with
+        # _tag, but callers that resolve a route directly (gateway.session_worker_construct
+        # .route_runtime, used by an in-process turn) do not, and without it the agent announces
+        # the collapsed wire id `custom` in the system prompt (#141035).
+        pool_result["requested_provider"] = requested_provider
         return pool_result
     # An explicit --api-key wins as the one-off recovery escape hatch. ``key_cmd`` credentials are
     # minted per request (short-lived bearers would go stale mid-session); both wire clients accept a
