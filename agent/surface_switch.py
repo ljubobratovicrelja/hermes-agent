@@ -61,6 +61,51 @@ def identity_line_value(prompt: str, label: str) -> str:
     return matches[-1] if matches else ""
 
 
+# Provider ids that name no route of their own: the wire provider behind a configured
+# ``providers.<name>`` entry.  A trailer that says one of these says nothing the user chose.
+_COLLAPSED_PROVIDER_LABELS = frozenset({"custom", "auto", "main"})
+
+
+def runtime_provider_label(agent: Any) -> str:
+    """The provider name a prompt announces and the restore probe compares (#141035).
+
+    A configured named provider resolves to the anonymous wire provider ``custom`` with the
+    configured name kept in ``requested_provider`` (``hermes_cli.runtime_provider_custom``),
+    while a ``/model`` switch builds the agent with the configured name as ``provider``.  Both
+    reach the same ``base_url``.  Announce the configured name on either path: one unchanged
+    route must not have two identities, or every hand-off between the paths rebuilds the
+    prompt and re-prefills the whole conversation behind it.
+    """
+    provider = str(getattr(agent, "provider", "") or "").strip()
+    requested = str(getattr(agent, "requested_provider", "") or "").strip()
+    if (provider.lower() in _COLLAPSED_PROVIDER_LABELS and requested
+            and requested.lower() not in _COLLAPSED_PROVIDER_LABELS):
+        return requested
+    return provider
+
+
+def provider_identity_values(agent: Any) -> set:
+    """Every ``Provider:`` value a stored prompt may legitimately carry for THIS route.
+
+    Two spellings are the same route by construction: the configured name, and the collapsed wire
+    name ``custom`` — a named provider IS a custom endpoint, and the only way ``custom`` reaches
+    this trailer for a named route is through the collapse.  Accepting both is what keeps an
+    unchanged route byte-stable across surfaces and ``/model`` switches; a genuinely different
+    route (another name, a cloud provider) is still a mismatch, and so is a model change.
+
+    Deliberately not derived from the provider registry or config: those are absent under a
+    sandboxed home and would silently change prompt bytes (and rebuilds) with the environment,
+    which is the class of bug this helper exists to remove.
+    """
+    provider = str(getattr(agent, "provider", "") or "").strip()
+    label = runtime_provider_label(agent)
+    values = {label, provider} - {""}
+    if label.lower() not in _COLLAPSED_PROVIDER_LABELS:
+        values.add("custom")
+    return values
+
+
+
 def _last_announced_surface(conversation_history: Any) -> str:
     """The surface named by the NEWEST switch note in the transcript ("" when none).
 

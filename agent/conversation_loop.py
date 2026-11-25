@@ -948,6 +948,8 @@ def _restore_or_build_system_prompt(agent, system_message, conversation_history)
     agent._cached_system_prompt = agent._build_system_prompt(system_message)
     if conversation_history:
         record_prompt_rebuild(agent, stored_prompt, stored_state, agent._cached_system_prompt)
+        if stored_state == "stale_runtime":
+            _log_prompt_divergence(agent, stored_prompt, agent._cached_system_prompt)
 
     # The rebuilt prompt describes the CURRENT surface, but a surface note left in the
     # transcript by an earlier switch does not — retire it here too, or a rebuild for an
@@ -984,6 +986,38 @@ def _restore_or_build_system_prompt(agent, system_message, conversation_history)
     stamp_prompt_epoch(agent, refresh_epoch)
 
 
+def _log_prompt_divergence(agent, stored: Optional[str], rebuilt: Optional[str]) -> None:
+    """Name WHERE a rebuild first differs from the bytes it replaces.
+
+    Every rebuild of a continuing session costs the whole conversation behind the prompt, so the
+    one thing an operator needs is which section moved.  The identity trailer alone names only the
+    Model/Provider lines; the measured break has been a skills-index or plugin block hundreds of
+    lines earlier, and finding that took a dig through ``state.db``.
+    """
+    if not isinstance(stored, str) or not isinstance(rebuilt, str):
+        return
+    try:
+        limit = min(len(stored), len(rebuilt))
+        offset = limit
+        for index in range(limit):
+            if stored[index] != rebuilt[index]:
+                offset = index
+                break
+        heading = ""
+        start = stored.rfind("\n#", 0, offset)
+        if start != -1:
+            end = stored.find("\n", start + 1)
+            heading = stored[start + 1: end if end != -1 else len(stored)].strip()
+        logger.info(
+            "System prompt rebuild for session %s diverges from the stored bytes at char %d%s "
+            "(stored %d chars, rebuilt %d).",
+            getattr(agent, "session_id", ""), offset,
+            f" inside {heading!r}" if heading else "", len(stored), len(rebuilt),
+        )
+    except Exception:
+        logger.debug("Prompt divergence diagnostic failed", exc_info=True)
+
+
 def _stored_prompt_matches_runtime(agent, prompt: str) -> bool:
     """Return False when the persisted runtime-identity lines are stale."""
     # Model/provider identity, then cwd drift.  A cwd change is a real content change (context
@@ -992,10 +1026,20 @@ def _stored_prompt_matches_runtime(agent, prompt: str) -> bool:
     # The builder omits an empty trailer line, so stored-but-now-empty is a route change too;
     # the rebuilt prompt then carries no line and matches from the next turn on.  Stored-empty
     # (pre-trailer prompts) keeps reusing.
-    for label, attr in (("Model", "model"), ("Provider", "provider")):
+    #
+    # Provider is compared through the route's identity set, not a single value: one configured
+    # endpoint is announced by its configured name on one path and by the collapsed wire name
+    # ``custom`` on another (#141035).  Accepting only the written literal made an unchanged route
+    # rebuild the prompt — and the whole conversation behind it — on every hand-off between them.
+    from agent.surface_switch import provider_identity_values
+    accepted = {
+        "Model": {str(getattr(agent, "model", "") or "").strip()},
+        "Provider": provider_identity_values(agent),
+    }
+    for label in ("Model", "Provider"):
         stored = identity_line_value(prompt, label)
-        current = str(getattr(agent, attr, "") or "").strip()
-        if stored and stored != current:
+        current = accepted[label] - {""}
+        if stored and stored not in current:
             return False
     # A prompt stamped for another session (a /branch child copies its parent's bytes) must not
     # tell the model a foreign Session ID.  Checked only when the trailer is on: with it off, a

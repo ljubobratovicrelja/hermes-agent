@@ -541,8 +541,14 @@ def _timestamp_line(agent: Any) -> str:
     if getattr(agent, "_bot_chat_timeless_prompt", False):
         timestamp_line = f"Timezone: {', '.join(_bits)}" if _bits else ""
     trailer = (("Session ID", agent.session_id if agent.pass_session_id else None), ("Model", agent.model),
-               ("Provider", agent.provider), ("Platform", agent.platform))
+               ("Provider", _runtime_provider_label(agent)), ("Platform", agent.platform))
     return timestamp_line + "".join(f"\n{label}: {value}" for label, value in trailer if value)
+
+
+def _runtime_provider_label(agent: Any) -> str:
+    """The configured route name for the trailer, never the collapsed wire value (#141035)."""
+    from agent.surface_switch import runtime_provider_label
+    return runtime_provider_label(agent)
 
 
 def _memory_parts(agent: Any) -> list[str]:
