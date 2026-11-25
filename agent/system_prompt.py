@@ -28,6 +28,7 @@ from agent.prompt_builder import (
 )
 from agent import prompt_builder as _pb
 from agent.runtime_cwd import resolve_agent_cwd, resolve_context_cwd
+from agent.surface_switch import runtime_provider_label
 from hermes_constants import get_default_hermes_root, get_hermes_home
 from utils import is_truthy_value
 
@@ -541,14 +542,8 @@ def _timestamp_line(agent: Any) -> str:
     if getattr(agent, "_bot_chat_timeless_prompt", False):
         timestamp_line = f"Timezone: {', '.join(_bits)}" if _bits else ""
     trailer = (("Session ID", agent.session_id if agent.pass_session_id else None), ("Model", agent.model),
-               ("Provider", _runtime_provider_label(agent)), ("Platform", agent.platform))
+               ("Provider", runtime_provider_label(agent)), ("Platform", agent.platform))
     return timestamp_line + "".join(f"\n{label}: {value}" for label, value in trailer if value)
-
-
-def _runtime_provider_label(agent: Any) -> str:
-    """The configured route name for the trailer, never the collapsed wire value (#141035)."""
-    from agent.surface_switch import runtime_provider_label
-    return runtime_provider_label(agent)
 
 
 def _memory_parts(agent: Any) -> list[str]:

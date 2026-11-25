@@ -33,7 +33,8 @@ from agent.prompt_caching import (
 from agent.repetition_guard import REPETITION_LOOP_INTERRUPTED, is_runaway_repetition
 from agent.runtime_cwd import resolve_agent_cwd
 from agent.surface_switch import (
-    identity_line_value, note_inert_pinned_tools, runtime_host_value, stage_surface_switch_note,
+    identity_line_value, note_inert_pinned_tools, provider_identity_values, runtime_host_value,
+    stage_surface_switch_note,
 )
 from agent.turn_context import PRE_LLM_BLOCK_EXIT_REASON, PreflightCompressionTimedOut, build_turn_context
 from hermes_cli.observability.shared_metrics_efficiency import record_cache_break, record_prompt_rebuild
@@ -994,7 +995,7 @@ def _log_prompt_divergence(agent, stored: Optional[str], rebuilt: Optional[str])
     Model/Provider lines; the measured break has been a skills-index or plugin block hundreds of
     lines earlier, and finding that took a dig through ``state.db``.
     """
-    if not isinstance(stored, str) or not isinstance(rebuilt, str):
+    if not isinstance(stored, str) or not isinstance(rebuilt, str) or stored == rebuilt:
         return
     try:
         limit = min(len(stored), len(rebuilt))
@@ -1003,6 +1004,15 @@ def _log_prompt_divergence(agent, stored: Optional[str], rebuilt: Optional[str])
             if stored[index] != rebuilt[index]:
                 offset = index
                 break
+        if offset == limit:
+            # A truncated (or extended) rebuild shares the whole shorter string: not a divergence.
+            if len(rebuilt) < len(stored):
+                relation = f"rebuilt is a prefix of the stored bytes ({len(rebuilt)} of {len(stored)} chars)"
+            else:
+                relation = f"the stored bytes are a prefix of the rebuild ({len(stored)} of {len(rebuilt)} chars)"
+            logger.info("System prompt rebuild for session %s: %s.",
+                        getattr(agent, "session_id", ""), relation)
+            return
         heading = ""
         start = stored.rfind("\n#", 0, offset)
         if start != -1:
@@ -1031,7 +1041,6 @@ def _stored_prompt_matches_runtime(agent, prompt: str) -> bool:
     # endpoint is announced by its configured name on one path and by the collapsed wire name
     # ``custom`` on another (#141035).  Accepting only the written literal made an unchanged route
     # rebuild the prompt — and the whole conversation behind it — on every hand-off between them.
-    from agent.surface_switch import provider_identity_values
     accepted = {
         "Model": {str(getattr(agent, "model", "") or "").strip()},
         "Provider": provider_identity_values(agent),

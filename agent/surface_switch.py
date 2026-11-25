@@ -71,39 +71,59 @@ def runtime_provider_label(agent: Any) -> str:
 
     A configured named provider resolves to the anonymous wire provider ``custom`` with the
     configured name kept in ``requested_provider`` (``hermes_cli.runtime_provider_custom``),
-    while a ``/model`` switch builds the agent with the configured name as ``provider``.  Both
-    reach the same ``base_url``.  Announce the configured name on either path: one unchanged
-    route must not have two identities, or every hand-off between the paths rebuilds the
-    prompt and re-prefills the whole conversation behind it.
+    a ``/model`` switch may carry it as ``custom:<name>``, and a bare agent may carry the name
+    in ``provider`` alone.  All of those name one route, so the trailer announces the NAME on
+    every path; an unnamed route keeps its collapsed id (``custom``, ``auto``, ...).
     """
     provider = str(getattr(agent, "provider", "") or "").strip()
-    requested = str(getattr(agent, "requested_provider", "") or "").strip()
-    if (provider.lower() in _COLLAPSED_PROVIDER_LABELS and requested
-            and requested.lower() not in _COLLAPSED_PROVIDER_LABELS):
-        return requested
-    return provider
+    if not provider:
+        return ""
+    name = _provider_name(provider)
+    if name:
+        return name
+    # A collapsed wire id: the configured name, when the runtime carried one, is the identity.
+    return _provider_name(str(getattr(agent, "requested_provider", "") or "")) or provider
 
 
 def provider_identity_values(agent: Any) -> set:
     """Every ``Provider:`` value a stored prompt may legitimately carry for THIS route.
 
-    Two spellings are the same route by construction: the configured name, and the collapsed wire
-    name ``custom`` — a named provider IS a custom endpoint, and the only way ``custom`` reaches
-    this trailer for a named route is through the collapse.  Accepting both is what keeps an
-    unchanged route byte-stable across surfaces and ``/model`` switches; a genuinely different
-    route (another name, a cloud provider) is still a mismatch, and so is a model change.
+    One route has two spellings by construction — the configured name and the collapsed wire
+    name ``custom`` — plus the ``custom:<name>`` id a provider picker assigns.  Accepting them
+    keeps an unchanged route byte-stable across surfaces and switches.
+
+    ``custom`` is added only for an agent actually wired to the custom provider: adding it for
+    every named route (which this helper did first, and which a reviewer's probe caught) made a
+    stored ``Provider: custom`` acceptable to an OpenRouter / Anthropic / MoA agent, so a real
+    custom -> cloud switch sharing one model string would never rebuild and the trailer would
+    lie for the rest of the session.
 
     Deliberately not derived from the provider registry or config: those are absent under a
     sandboxed home and would silently change prompt bytes (and rebuilds) with the environment,
     which is the class of bug this helper exists to remove.
     """
     provider = str(getattr(agent, "provider", "") or "").strip()
+    requested = str(getattr(agent, "requested_provider", "") or "").strip()
     label = runtime_provider_label(agent)
-    values = {label, provider} - {""}
-    if label.lower() not in _COLLAPSED_PROVIDER_LABELS:
+    values = {label, provider, requested} - {""}
+    if _is_custom_wire(provider):
         values.add("custom")
     return values
 
+
+def _provider_name(value: str) -> str:
+    """The named part of a provider id: ``custom:foo`` -> ``foo``; a collapsed id -> ``""``."""
+    value = (value or "").strip()
+    lowered = value.lower()
+    if lowered.startswith("custom:"):
+        return value.split(":", 1)[1].strip()
+    return "" if lowered in _COLLAPSED_PROVIDER_LABELS else value
+
+
+def _is_custom_wire(value: str) -> bool:
+    """True for the generic custom wire: ``custom`` or ``custom:<name>``."""
+    lowered = (value or "").strip().lower()
+    return lowered == "custom" or lowered.startswith("custom:")
 
 
 def _last_announced_surface(conversation_history: Any) -> str:
