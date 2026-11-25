@@ -463,3 +463,24 @@ class TestDiagnosticAccuracy:
         eff.record_prompt_rebuild(same_route, stored, "stale_runtime", stored + "Host: x\n")
 
         assert causes == ["system_prompt_rebuild"]
+
+
+class TestRuntimePremise:
+    """Pin the shape the whole fix rests on where it is produced, not only in fixtures."""
+
+    def test_a_named_custom_provider_resolves_to_the_wire_id_plus_its_name(self):
+        from hermes_cli.runtime_provider_custom import _resolve_named_custom_runtime
+        from agent.surface_switch import runtime_provider_label
+
+        cfg = {
+            "model": {"provider": "qwen-next", "default": MODEL},
+            "providers": {"qwen-next": {"base_url": QWEN_URL, "api_key": "", "default_model": MODEL}},
+        }
+        rt = _resolve_named_custom_runtime(requested_provider="qwen-next", config=cfg)
+
+        assert rt["provider"] == "custom"
+        assert rt["requested_provider"] == "qwen-next"
+        # The runtime's pair is what the gateway hands the agent; the label it announces is the
+        # configured name, so the prompt this route builds is accepted by its own probe.
+        label = runtime_provider_label(SimpleNamespace(**rt))
+        assert label == "qwen-next"
