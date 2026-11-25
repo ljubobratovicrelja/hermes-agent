@@ -73,42 +73,56 @@ def runtime_provider_label(agent: Any) -> str:
     configured name kept in ``requested_provider`` (``hermes_cli.runtime_provider_custom``),
     a ``/model`` switch may carry it as ``custom:<name>``, and a bare agent may carry the name
     in ``provider`` alone.  All of those name one route, so the trailer announces the NAME on
-    every path; an unnamed route keeps its collapsed id (``custom``, ``auto``, ...).
+    every path, in one canonical spelling; an unnamed route keeps its collapsed id
+    (``custom``, ``auto``, ...), and an agent with no provider announces nothing.
     """
     provider = str(getattr(agent, "provider", "") or "").strip()
     if not provider:
         return ""
-    name = _provider_name(provider)
-    if name:
-        return name
-    # A collapsed wire id: the configured name, when the runtime carried one, is the identity.
-    return _provider_name(str(getattr(agent, "requested_provider", "") or "")) or provider
+    requested = str(getattr(agent, "requested_provider", "") or "").strip()
+    return (canonical_provider_value(_provider_name(provider) or _provider_name(requested))
+            or canonical_provider_value(provider))
 
 
 def provider_identity_values(agent: Any) -> set:
     """Every ``Provider:`` value a stored prompt may legitimately carry for THIS route.
 
-    One route has two spellings by construction — the configured name and the collapsed wire
-    name ``custom`` — plus the ``custom:<name>`` id a provider picker assigns.  Accepting them
-    keeps an unchanged route byte-stable across surfaces and switches.
-
-    ``custom`` is added only for an agent actually wired to the custom provider: adding it for
-    every named route (which this helper did first, and which a reviewer's probe caught) made a
-    stored ``Provider: custom`` acceptable to an OpenRouter / Anthropic / MoA agent, so a real
-    custom -> cloud switch sharing one model string would never rebuild and the trailer would
-    lie for the rest of the session.
+    One route has more than one spelling by construction — the configured name, the collapsed
+    wire name ``custom``, and the ``custom:<name>`` id a provider picker assigns — so all of
+    them are accepted for an unchanged route.  ``custom`` is accepted only for an agent
+    actually wired to the custom provider: treating it as an alias of every route would let an
+    OpenRouter / Anthropic / MoA agent accept a stored ``Provider: custom``, and a real
+    custom -> cloud switch sharing one model string would then never rebuild.
 
     Deliberately not derived from the provider registry or config: those are absent under a
-    sandboxed home and would silently change prompt bytes (and rebuilds) with the environment,
-    which is the class of bug this helper exists to remove.
+    sandboxed home and would silently change prompt bytes (and rebuilds) with the environment.
     """
     provider = str(getattr(agent, "provider", "") or "").strip()
+    if not provider:
+        return set()
     requested = str(getattr(agent, "requested_provider", "") or "").strip()
-    label = runtime_provider_label(agent)
-    values = {label, provider, requested} - {""}
+    values = {runtime_provider_label(agent), canonical_provider_value(provider),
+              canonical_provider_value(requested)} - {""}
     if _is_custom_wire(provider):
         values.add("custom")
     return values
+
+
+def provider_line_matches(stored_value: str, agent: Any) -> bool:
+    """True when a stored ``Provider:`` value names this agent's route."""
+    stored = canonical_provider_value(stored_value)
+    return not stored or stored in provider_identity_values(agent)
+
+
+def canonical_provider_value(value: str) -> str:
+    """One spelling for a provider id or display name: ``custom:Strata Mint`` -> ``strata-mint``.
+
+    ``providers.<key>`` entries are addressed by their key, their display ``name:`` and their
+    ``custom:<slug>`` id; without this a session on an entry whose name has a space would
+    announce two identities for one route and rebuild on every hand-off between them.
+    """
+    name = _provider_name(value) or (value or "").strip()
+    return name.strip().lower().replace(" ", "-")
 
 
 def _provider_name(value: str) -> str:

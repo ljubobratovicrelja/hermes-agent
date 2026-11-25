@@ -25,6 +25,8 @@ import logging
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
+import pytest
+
 from agent.conversation_loop import _log_prompt_divergence, _restore_or_build_system_prompt
 from agent.system_prompt import _timestamp_line
 
@@ -197,6 +199,76 @@ class TestRealRouteChangesStillRebuild:
         _restore(agent, stored)
 
         agent._build_system_prompt.assert_called_once()
+
+
+class TestWriterAndProbeAgree:
+    """What the builder writes into the trailer, the probe must accept.
+
+    This is the pairing the change exists to guarantee; a test that hand-writes the ``Provider:``
+    literal can pass while the writer and the probe disagree (which is how a failover-restore path
+    writing the collapsed wire id escaped the first pass).
+    """
+
+    SHAPES = [
+        ("gateway_named", {"provider": "custom", "requested_provider": "qwen-next"}),
+        ("picker", {"provider": "custom:qwen-next", "requested_provider": "custom:qwen-next"}),
+        ("bare_name", {"provider": "qwen-next", "requested_provider": "qwen-next"}),
+        ("bare_custom", {"provider": "custom", "requested_provider": ""}),
+        ("display_name", {"provider": "custom", "requested_provider": "Strata Mint"}),
+        ("cloud", {"provider": "openrouter", "requested_provider": "openrouter"}),
+        ("anthropic", {"provider": "anthropic", "requested_provider": "anthropic"}),
+        ("moa", {"provider": "moa", "requested_provider": "moa"}),
+    ]
+
+    @staticmethod
+    def _probe(agent, stored: str) -> bool:
+        from agent.conversation_loop import _stored_prompt_matches_runtime
+        return _stored_prompt_matches_runtime(agent, stored)
+
+    @pytest.mark.parametrize("name,identity", SHAPES, ids=[s[0] for s in SHAPES])
+    def test_the_trailer_the_builder_writes_is_accepted_by_the_probe(self, name, identity):
+        agent = _render_agent(**identity)
+        assert self._probe(agent, "body\n\n" + _timestamp_line(agent)), name
+
+    def test_display_name_and_key_spellings_are_one_identity(self):
+        """`providers.strata-mint.name: Strata Mint` must not announce two providers."""
+        gateway = _render_agent(provider="custom", requested_provider="Strata Mint")
+        assert "Provider: strata-mint" in _timestamp_line(gateway)
+
+        switch = _render_agent(provider="custom:strata-mint",
+                               requested_provider="custom:strata-mint")
+        assert self._probe(gateway, "body\n\n" + _timestamp_line(switch))
+        assert self._probe(switch, "body\n\n" + _timestamp_line(gateway))
+
+
+class TestRestorePathKeepsTheLabel:
+    def test_failover_restore_rewrites_the_name_not_the_wire_id(self, monkeypatch):
+        """The undo-writer must restore the bytes the builder would write (#141035)."""
+        from agent import route_binding
+
+        for target in (
+            "agent.agent_runtime_helpers._restore_runtime_capabilities",
+            "agent.agent_runtime_helpers._rebuild_primary_client",
+            "agent.route_verdicts.reset_route_verdicts",
+            "agent.chat_completion_helpers._reset_stale_streak",
+        ):
+            monkeypatch.setattr(target, lambda *a, **k: None)
+
+        stored = "body\n\n" + _timestamp_line(_render_agent())
+        agent = MagicMock()
+        agent._cached_system_prompt = stored
+        rt = {
+            "model": MODEL, "provider": "custom", "requested_provider": "qwen-next",
+            "base_url": QWEN_URL, "api_mode": "chat_completions", "api_key": "k",
+            "request_overrides": {}, "client_kwargs": {}, "use_prompt_caching": True,
+            "use_native_cache_layout": False, "compressor_model": MODEL,
+            "compressor_context_length": 262144, "compressor_base_url": QWEN_URL,
+            "compressor_api_key": "k", "compressor_provider": "custom",
+        }
+
+        route_binding.reinstall_runtime_snapshot(agent, rt)
+
+        assert agent._cached_system_prompt == stored
 
 
 class TestRebuildDivergenceDiagnostic:

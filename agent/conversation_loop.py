@@ -33,7 +33,7 @@ from agent.prompt_caching import (
 from agent.repetition_guard import REPETITION_LOOP_INTERRUPTED, is_runaway_repetition
 from agent.runtime_cwd import resolve_agent_cwd
 from agent.surface_switch import (
-    identity_line_value, note_inert_pinned_tools, provider_identity_values, runtime_host_value,
+    identity_line_value, note_inert_pinned_tools, provider_line_matches, runtime_host_value,
     stage_surface_switch_note,
 )
 from agent.turn_context import PRE_LLM_BLOCK_EXIT_REASON, PreflightCompressionTimedOut, build_turn_context
@@ -1018,11 +1018,15 @@ def _log_prompt_divergence(agent, stored: Optional[str], rebuilt: Optional[str])
         if start != -1:
             end = stored.find("\n", start + 1)
             heading = stored[start + 1: end if end != -1 else len(stored)].strip()
+        line_start = stored.rfind("\n", 0, offset) + 1
+        line_end = stored.find("\n", offset)
+        moved = stored[line_start: line_end if line_end != -1 else len(stored)].strip()[:160]
         logger.info(
-            "System prompt rebuild for session %s diverges from the stored bytes at char %d%s "
+            "System prompt rebuild for session %s diverges from the stored bytes at char %d%s%s "
             "(stored %d chars, rebuilt %d).",
             getattr(agent, "session_id", ""), offset,
-            f" inside {heading!r}" if heading else "", len(stored), len(rebuilt),
+            f" inside {heading!r}" if heading else "", f" at {moved!r}" if moved else "",
+            len(stored), len(rebuilt),
         )
     except Exception:
         logger.debug("Prompt divergence diagnostic failed", exc_info=True)
@@ -1041,15 +1045,12 @@ def _stored_prompt_matches_runtime(agent, prompt: str) -> bool:
     # endpoint is announced by its configured name on one path and by the collapsed wire name
     # ``custom`` on another (#141035).  Accepting only the written literal made an unchanged route
     # rebuild the prompt — and the whole conversation behind it — on every hand-off between them.
-    accepted = {
-        "Model": {str(getattr(agent, "model", "") or "").strip()},
-        "Provider": provider_identity_values(agent),
-    }
-    for label in ("Model", "Provider"):
-        stored = identity_line_value(prompt, label)
-        current = accepted[label] - {""}
-        if stored and stored not in current:
-            return False
+    stored_model = identity_line_value(prompt, "Model")
+    current_model = str(getattr(agent, "model", "") or "").strip()
+    if stored_model and stored_model != current_model:
+        return False
+    if not provider_line_matches(identity_line_value(prompt, "Provider"), agent):
+        return False
     # A prompt stamped for another session (a /branch child copies its parent's bytes) must not
     # tell the model a foreign Session ID.  Checked only when the trailer is on: with it off, a
     # "Session ID:" line in project text would read as a mismatch and rebuild every turn.

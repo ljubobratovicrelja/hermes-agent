@@ -166,8 +166,10 @@ def reinstall_runtime_snapshot(agent: Any, rt: dict[str, Any]) -> None:
     from agent.chat_completion_helpers import _reset_stale_streak, rewrite_prompt_model_identity
     _reset_stale_streak(agent)
     # Undo the identity rewrite so the prompt is byte-identical to the stored copy again
-    # (prefix cache match).
-    rewrite_prompt_model_identity(agent, rt["model"], rt["provider"])
+    # (prefix cache match).  The builder announces the route's NAME, not the collapsed wire id
+    # (#141035): writing rt["provider"] back here would diverge the bytes it is undoing.
+    from agent.surface_switch import runtime_provider_label
+    rewrite_prompt_model_identity(agent, rt["model"], runtime_provider_label(agent))
 
 
 def reinstall_primary_runtime(

@@ -165,7 +165,8 @@ def begin_voice_turn_route(agent: Any, messages: list[dict[str, Any]], system_pr
         if (choice := getattr(agent, "_route_pool_choice", None)) is not None:
             choice.commit()  # the voice model takes the turn: its pool key is now in use
         from agent.chat_completion_helpers import rewrite_prompt_model_identity
-        rewrite_prompt_model_identity(agent, agent.model, agent.provider)
+        from agent.surface_switch import runtime_provider_label
+        rewrite_prompt_model_identity(agent, agent.model, runtime_provider_label(agent))
         agent._turn_route_task = TASK
         logger.info("Voice turn routed to %s (%s)", agent.model, agent.provider)
     if effort is not None:
