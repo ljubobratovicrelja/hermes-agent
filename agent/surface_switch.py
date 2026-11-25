@@ -100,12 +100,13 @@ def provider_identity_values(agent: Any) -> set:
     provider = str(getattr(agent, "provider", "") or "").strip()
     if not provider:
         return set()
-    requested = str(getattr(agent, "requested_provider", "") or "").strip()
-    values = {runtime_provider_label(agent), canonical_provider_value(provider),
-              canonical_provider_value(requested)} - {""}
+    values = {runtime_provider_label(agent), canonical_provider_value(provider)} - {""}
     if _is_custom_wire(provider):
+        # Only a collapsed wire id needs the configured name alongside it; on a route that names
+        # itself, `requested_provider` is a duplicate at best and junk at worst.
         values.add("custom")
-    return values
+        values.add(canonical_provider_value(str(getattr(agent, "requested_provider", "") or "")))
+    return values - {""}
 
 
 def provider_line_matches(stored_value: str, agent: Any) -> bool:
@@ -119,10 +120,14 @@ def canonical_provider_value(value: str) -> str:
 
     ``providers.<key>`` entries are addressed by their key, their display ``name:`` and their
     ``custom:<slug>`` id; without this a session on an entry whose name has a space would
-    announce two identities for one route and rebuild on every hand-off between them.
+    announce two identities for one route and rebuild on every hand-off between them.  A
+    ``custom:`` with no name behind it is the bare custom wire, not a provider called ``custom:``.
     """
-    name = _provider_name(value) or (value or "").strip()
-    return name.strip().lower().replace(" ", "-")
+    raw = (value or "").strip()
+    name = _provider_name(raw)
+    if name:
+        return name.strip().lower().replace(" ", "-")
+    return "custom" if raw.lower().startswith("custom:") else raw.lower().replace(" ", "-")
 
 
 def _provider_name(value: str) -> str:

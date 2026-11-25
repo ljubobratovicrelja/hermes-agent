@@ -28,6 +28,7 @@ from unittest.mock import MagicMock
 import pytest
 
 from agent.conversation_loop import _log_prompt_divergence, _restore_or_build_system_prompt
+from agent.surface_switch import identity_line_value
 from agent.system_prompt import _timestamp_line
 
 QWEN_URL = "http://localhost:8005/v1"
@@ -86,26 +87,31 @@ class TestIdentityTrailerNamesTheRoute:
     def test_named_custom_route_renders_its_configured_name(self):
         """The gateway's agent is 'custom' on the wire but 'qwen-next' to the user."""
         line = _timestamp_line(_render_agent())
-        assert "Provider: qwen-next" in line
+        assert identity_line_value(line, "Provider") == "qwen-next"
 
     def test_custom_prefixed_id_renders_the_name(self):
         agent = _render_agent(provider="custom:qwen-next", requested_provider="custom:qwen-next")
-        assert "Provider: qwen-next" in _timestamp_line(agent)
+        assert identity_line_value(_timestamp_line(agent), "Provider") == "qwen-next"
 
     def test_bare_custom_route_still_renders_custom(self):
         agent = _render_agent(provider="custom", requested_provider="")
-        assert "Provider: custom" in _timestamp_line(agent)
+        line = _timestamp_line(agent)
+        assert identity_line_value(line, "Provider") == "custom"
+        # A nameless `custom:` must collapse, not survive as a provider called 'custom:'.
+        assert "Provider: custom:" not in line
 
     def test_cloud_route_is_unchanged(self):
         agent = _render_agent(model="deepseek/deepseek-v4.1-flash-1017",
                               provider="openrouter", requested_provider="openrouter",
                               base_url="https://openrouter.ai/api/v1")
-        assert "Provider: openrouter" in _timestamp_line(agent)
+        assert identity_line_value(_timestamp_line(agent), "Provider") == "openrouter"
 
     def test_absent_provider_renders_no_line(self):
         """An agent with no provider must not invent one from `requested_provider`."""
         agent = _render_agent(provider="", requested_provider="stale-name")
-        assert "Provider:" not in _timestamp_line(agent)
+        line = _timestamp_line(agent)
+        assert identity_line_value(line, "Provider") == ""
+        assert "Provider:" not in line
 
 
 class TestSameRouteAcrossSurfacesReusesThePrompt:
@@ -201,6 +207,36 @@ class TestRealRouteChangesStillRebuild:
         agent._build_system_prompt.assert_called_once()
 
 
+class TestProviderValueEdgeCases:
+    """Spellings that are not routes: a nameless ``custom:`` and junk in ``requested_provider``."""
+
+    @staticmethod
+    def _probe(agent, stored: str) -> bool:
+        from agent.conversation_loop import _stored_prompt_matches_runtime
+        return _stored_prompt_matches_runtime(agent, stored)
+
+    def test_custom_prefix_without_a_name_is_the_bare_wire(self):
+        agent = _render_agent(provider="custom:", requested_provider="")
+        line = _timestamp_line(agent)
+        assert identity_line_value(line, "Provider") == "custom"
+        assert "Provider: custom:" not in line
+        assert self._probe(agent, "body\n\n" + _timestamp_line(agent))
+
+    def test_junk_requested_provider_is_not_an_identity_on_a_named_route(self):
+        """`requested_provider` only names the route when the wire id was collapsed."""
+        agent = _restore_agent(_stored_prompt("5"), provider="openrouter",
+                               requested_provider="5", base_url="https://openrouter.ai/api/v1")
+
+        _restore(agent, _stored_prompt("5"))
+
+        agent._build_system_prompt.assert_called_once()
+
+    def test_surrounding_whitespace_does_not_create_a_second_identity(self):
+        spaced = _render_agent(provider="  Qwen-Next  ", requested_provider="  qwen-next ")
+        assert identity_line_value(_timestamp_line(spaced), "Provider") == "qwen-next"
+        assert self._probe(spaced, "body\n\n" + _timestamp_line(_render_agent()))
+
+
 class TestWriterAndProbeAgree:
     """What the builder writes into the trailer, the probe must accept.
 
@@ -233,7 +269,7 @@ class TestWriterAndProbeAgree:
     def test_display_name_and_key_spellings_are_one_identity(self):
         """`providers.strata-mint.name: Strata Mint` must not announce two providers."""
         gateway = _render_agent(provider="custom", requested_provider="Strata Mint")
-        assert "Provider: strata-mint" in _timestamp_line(gateway)
+        assert identity_line_value(_timestamp_line(gateway), "Provider") == "strata-mint"
 
         switch = _render_agent(provider="custom:strata-mint",
                                requested_provider="custom:strata-mint")
@@ -305,3 +341,125 @@ class TestRebuildDivergenceDiagnostic:
             _log_prompt_divergence(SimpleNamespace(session_id="s"), None, "abc")
 
         assert self._records(caplog) == []
+
+
+class TestEveryWriterUsesTheLabel:
+    """Three places rewrite the cached trailer mid-turn; each must write the same label.
+
+    An audit proved the voice and fallback writers were never executed by any test, which is
+    exactly how the failover-restore regression survived the first review pass.
+    """
+
+    def test_voice_turn_writer_uses_the_label(self, monkeypatch):
+        from agent import voice_turn_route as vtr
+
+        stored = "body\n\n" + _timestamp_line(_render_agent())
+        agent = MagicMock()
+        agent._voice_turn_pending = True
+        agent._route_pool_choice = None
+        agent.reasoning_config = {}
+        agent._client_kwargs = {}
+        agent.request_overrides = {}
+        agent.model = MODEL
+        agent.provider = "custom"
+        agent.requested_provider = "qwen-next"
+        agent.base_url = QWEN_URL
+        agent.api_mode = "chat_completions"
+        agent._cached_system_prompt = stored
+
+        import agent.auxiliary_task_config as atc
+        monkeypatch.setattr(atc, "_get_auxiliary_task_config",
+                            lambda task: {"provider": "custom", "model": MODEL, "base_url": QWEN_URL})
+        monkeypatch.setattr(vtr, "_capture", lambda a: {"snapshot": {"model": MODEL}})
+        monkeypatch.setattr(vtr, "_fits", lambda *a: True)
+
+        def bind(a, entry, provider, model, **kw):
+            a.model, a.provider, a.requested_provider = model, "custom", "qwen-next"
+            return ("old", "old-provider")
+
+        monkeypatch.setattr("agent.route_binding.bind_route_entry", bind)
+
+        vtr.begin_voice_turn_route(agent, [{"role": "user", "content": "hi"}], stored)
+
+        assert agent._cached_system_prompt == stored
+
+    def test_fallback_activation_writer_uses_the_label(self, monkeypatch):
+        from agent import chat_completion_helpers as cch
+
+        stored = "body\n\n" + _timestamp_line(_render_agent())
+        agent = MagicMock()
+        agent._fallback_chain = [{"provider": "custom", "model": "m2"}]
+        agent._fallback_index = 0
+        agent._unavailable_fallback_keys = set()
+        agent.model = MODEL
+        agent.provider = "custom"
+        agent.requested_provider = "qwen-next"
+        agent.base_url = QWEN_URL
+        agent._cached_system_prompt = stored
+
+        import agent.fallback_cooldown as fc
+        import agent.fallback_notice as fn
+        monkeypatch.setattr(fc, "switch_deferred_by_reset", lambda *a, **k: False)
+        monkeypatch.setattr(fc, "_arm_rate_limit_cooldown", lambda *a, **k: None)
+        monkeypatch.setattr(cch, "_should_skip_fallback_candidate", lambda *a, **k: False)
+        monkeypatch.setattr(fn, "announce_fallback_switch", lambda *a, **k: None)
+        monkeypatch.setattr(cch, "_log_fallback_activated", lambda *a, **k: None)
+
+        def bind(a, fb, provider, model, **kw):
+            a.model, a.provider, a.requested_provider = model, "custom", "qwen-next"
+            return ("old-model", "custom")
+
+        monkeypatch.setattr("agent.route_binding.bind_route_entry", bind)
+
+        assert cch.try_activate_fallback(agent) is True
+        assert identity_line_value(agent._cached_system_prompt, "Provider") == "qwen-next"
+
+
+class TestDiagnosticAccuracy:
+    """The rebuild diagnostic must name the true position AND be wired into the rebuild."""
+
+    @staticmethod
+    def _records(caplog):
+        return [r.getMessage() for r in caplog.records if "System prompt rebuild" in r.getMessage()]
+
+    def test_divergence_reports_the_true_first_difference(self, caplog):
+        stored = "body\n\nModel: a\nProvider: custom\n\nPlatform: discord"
+        rebuilt = "body\n\nModel: a\nProvider: qwen-next\n\nPlatform: discord"
+        expected = next(i for i, (a, b) in enumerate(zip(stored, rebuilt)) if a != b)
+
+        with caplog.at_level(logging.INFO, logger="agent.conversation_loop"):
+            _log_prompt_divergence(SimpleNamespace(session_id="s"), stored, rebuilt)
+
+        assert f"char {expected}" in self._records(caplog)[0]
+
+    def test_the_restore_path_logs_where_a_stale_rebuild_diverged(self, caplog):
+        """Deleting the call site must fail: calling the helper directly is not enough."""
+        stored = _stored_prompt("qwen-next")
+        agent = _restore_agent(stored, prebuilt=_stored_prompt("openrouter"),
+                               provider="openrouter", requested_provider="openrouter",
+                               base_url="https://openrouter.ai/api/v1")
+
+        with caplog.at_level(logging.INFO, logger="agent.conversation_loop"):
+            _restore(agent, stored)
+
+        agent._build_system_prompt.assert_called_once()
+        assert any("diverges" in line for line in self._records(caplog)), self._records(caplog)
+
+    def test_no_provider_agent_does_not_accept_a_stored_provider_name(self):
+        """The probe side of 'an agent with no provider announces nothing'."""
+        from agent.conversation_loop import _stored_prompt_matches_runtime
+        agent = _render_agent(provider="", requested_provider="qwen-next")
+        assert _stored_prompt_matches_runtime(agent, _stored_prompt("qwen-next")) is False
+
+    def test_prompt_rebuild_without_a_stored_model_line_is_not_a_model_switch(self, monkeypatch):
+        """A legacy row with no Model: line must not be reported as a model switch."""
+        from hermes_cli.observability import shared_metrics_efficiency as eff
+
+        causes = []
+        monkeypatch.setattr(eff, "record_cache_break", lambda agent, cause: causes.append(cause))
+        stored = "You are Hermes.\nProvider: qwen-next\n"
+        same_route = SimpleNamespace(provider="custom", requested_provider="qwen-next", model="model-a")
+
+        eff.record_prompt_rebuild(same_route, stored, "stale_runtime", stored + "Host: x\n")
+
+        assert causes == ["system_prompt_rebuild"]
