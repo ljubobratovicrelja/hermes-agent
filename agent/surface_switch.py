@@ -61,6 +61,90 @@ def identity_line_value(prompt: str, label: str) -> str:
     return matches[-1] if matches else ""
 
 
+# Provider ids that name no route of their own: the wire provider behind a configured
+# ``providers.<name>`` entry.  A trailer that says one of these says nothing the user chose.
+_COLLAPSED_PROVIDER_LABELS = frozenset({"custom", "auto", "main"})
+
+
+def runtime_provider_label(agent: Any) -> str:
+    """The provider name a prompt announces and the restore probe compares (#141035).
+
+    A configured named provider resolves to the anonymous wire provider ``custom`` with the
+    configured name kept in ``requested_provider`` (``hermes_cli.runtime_provider_custom``),
+    a ``/model`` switch may carry it as ``custom:<name>``, and a bare agent may carry the name
+    in ``provider`` alone.  All of those name one route, so the trailer announces the NAME on
+    every path, in one canonical spelling; an unnamed route keeps its collapsed id
+    (``custom``, ``auto``, ...), and an agent with no provider announces nothing.
+    """
+    provider = str(getattr(agent, "provider", "") or "").strip()
+    if not provider:
+        return ""
+    requested = str(getattr(agent, "requested_provider", "") or "").strip()
+    return (canonical_provider_value(_provider_name(provider) or _provider_name(requested))
+            or canonical_provider_value(provider))
+
+
+def provider_identity_values(agent: Any) -> set:
+    """Every ``Provider:`` value a stored prompt may legitimately carry for THIS route.
+
+    One route has more than one spelling by construction — the configured name, the collapsed
+    wire name ``custom``, and the ``custom:<name>`` id a provider picker assigns — so all of
+    them are accepted for an unchanged route.  ``custom`` is accepted only for an agent
+    actually wired to the custom provider: treating it as an alias of every route would let an
+    OpenRouter / Anthropic / MoA agent accept a stored ``Provider: custom``, and a real
+    custom -> cloud switch sharing one model string would then never rebuild.
+
+    Deliberately not derived from the provider registry or config: those are absent under a
+    sandboxed home and would silently change prompt bytes (and rebuilds) with the environment.
+    """
+    provider = str(getattr(agent, "provider", "") or "").strip()
+    if not provider:
+        return set()
+    values = {runtime_provider_label(agent), canonical_provider_value(provider)} - {""}
+    if _is_custom_wire(provider):
+        # Only a collapsed wire id needs the configured name alongside it; on a route that names
+        # itself, `requested_provider` is a duplicate at best and junk at worst.
+        values.add("custom")
+        values.add(canonical_provider_value(str(getattr(agent, "requested_provider", "") or "")))
+    return values - {""}
+
+
+def provider_line_matches(stored_value: str, agent: Any) -> bool:
+    """True when a stored ``Provider:`` value names this agent's route."""
+    stored = canonical_provider_value(stored_value)
+    return not stored or stored in provider_identity_values(agent)
+
+
+def canonical_provider_value(value: str) -> str:
+    """One spelling for a provider id or display name: ``custom:Strata Mint`` -> ``strata-mint``.
+
+    ``providers.<key>`` entries are addressed by their key, their display ``name:`` and their
+    ``custom:<slug>`` id; without this a session on an entry whose name has a space would
+    announce two identities for one route and rebuild on every hand-off between them.  A
+    ``custom:`` with no name behind it is the bare custom wire, not a provider called ``custom:``.
+    """
+    raw = (value or "").strip()
+    name = _provider_name(raw)
+    if name:
+        return name.strip().lower().replace(" ", "-")
+    return "custom" if raw.lower().startswith("custom:") else raw.lower().replace(" ", "-")
+
+
+def _provider_name(value: str) -> str:
+    """The named part of a provider id: ``custom:foo`` -> ``foo``; a collapsed id -> ``""``."""
+    value = (value or "").strip()
+    lowered = value.lower()
+    if lowered.startswith("custom:"):
+        return value.split(":", 1)[1].strip()
+    return "" if lowered in _COLLAPSED_PROVIDER_LABELS else value
+
+
+def _is_custom_wire(value: str) -> bool:
+    """True for the generic custom wire: ``custom`` or ``custom:<name>``."""
+    lowered = (value or "").strip().lower()
+    return lowered == "custom" or lowered.startswith("custom:")
+
+
 def _last_announced_surface(conversation_history: Any) -> str:
     """The surface named by the NEWEST switch note in the transcript ("" when none).
 

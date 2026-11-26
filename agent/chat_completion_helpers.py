@@ -2016,7 +2016,8 @@ def try_activate_fallback(agent, reason: FailoverReason | None = None, reset_at=
                 continue
             old_model, old_provider = bound
             fb_model = agent.model  # normalized by the binder
-            rewrite_prompt_model_identity(agent, fb_model, fb_provider)
+            from agent.surface_switch import runtime_provider_label
+            rewrite_prompt_model_identity(agent, fb_model, runtime_provider_label(agent))
 
             notice = (
                 f"⚠️ Model fallback: {old_model} via {old_provider} could not respond "

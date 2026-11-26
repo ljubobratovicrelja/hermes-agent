@@ -352,12 +352,12 @@ def record_prompt_rebuild(agent: Any, stored_prompt: Any, stored_state: str, reb
     if stored_state != "stale_runtime" or not stored_prompt or rebuilt == stored_prompt:
         return
     try:
-        from agent.surface_switch import identity_line_value
+        from agent.surface_switch import identity_line_value, provider_line_matches
 
-        switched = any(
-            (stored := identity_line_value(stored_prompt, label)) and stored != str(getattr(agent, attr, "") or "").strip()
-            for label, attr in (("Model", "model"), ("Provider", "provider"))
-        )
+        model = str(getattr(agent, "model", "") or "").strip()
+        stored_model = identity_line_value(stored_prompt, "Model")
+        switched = (bool(stored_model) and stored_model != model) or not provider_line_matches(
+            identity_line_value(stored_prompt, "Provider"), agent)
     except Exception:
         switched = False
     record_cache_break(agent, "model_switch" if switched else "system_prompt_rebuild")

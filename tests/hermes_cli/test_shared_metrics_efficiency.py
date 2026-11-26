@@ -200,6 +200,30 @@ def test_cache_breaks_count_known_causes_once_and_unannounced_cold_reads_as_miss
         (_dims(**ROUTE, cause="cache_expired"), 1), (_dims(**ROUTE, cause="toolset_change"), 1)])
 
 
+def test_prompt_rebuild_ignores_the_provider_alias_but_names_a_real_route_change(monkeypatch):
+    """#141035: 'custom' and its configured name are one route; another route is a switch.
+
+    A stored row carrying the collapsed wire id cannot name a route, so it is accepted by any
+    custom-wire agent; a row that names ANOTHER configured route is a switch.
+    """
+    causes = []
+    monkeypatch.setattr(eff, "record_cache_break", lambda agent, cause: causes.append(cause))
+    stored = "You are Hermes.\nModel: model-a\nProvider: qwen-next\n"
+    rebuilt = stored + "Host: x\n"
+
+    same_route = SimpleNamespace(provider="custom", requested_provider="qwen-next", model="model-a")
+    eff.record_prompt_rebuild(same_route, stored, "stale_runtime", rebuilt)
+    other_route = SimpleNamespace(provider="custom", requested_provider="strata-mint", model="model-a")
+    eff.record_prompt_rebuild(other_route, stored, "stale_runtime", rebuilt)
+    cloud = SimpleNamespace(provider="openrouter", requested_provider="openrouter", model="model-a")
+    eff.record_prompt_rebuild(cloud, stored, "stale_runtime", rebuilt)
+    collapsed_row = "You are Hermes.\nModel: model-a\nProvider: custom\n"
+    eff.record_prompt_rebuild(same_route, collapsed_row, "stale_runtime", collapsed_row + "Host: x\n")
+
+    assert causes == ["system_prompt_rebuild", "model_switch", "model_switch",
+                      "system_prompt_rebuild"]
+
+
 def test_prompt_rebuild_names_a_model_switch_apart_from_other_rebuilds(monkeypatch):
     causes = []
     monkeypatch.setattr(eff, "record_cache_break", lambda agent, cause: causes.append(cause))
