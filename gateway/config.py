@@ -398,11 +398,16 @@ def persist_home_channel(home: HomeChannel, *, enabled_if_new: bool = False) -> 
 
 @dataclass
 class ChannelOverride:
-    """Per-channel reply policy/model/provider/system_prompt override (``platforms.<name>.channel_overrides[channel_id]``)."""
+    """Per-channel reply policy/model/provider/system_prompt/cwd override (``platforms.<name>.channel_overrides[channel_id]``)."""
     model: Optional[str] = None
     provider: Optional[str] = None
     system_prompt: Optional[str] = None
     allow_silence: Optional[bool] = None
+    # Logical working directory for the chat's turns (``~/dev/acme-analytics``, ``~`` allowed):
+    # seeds the terminal tool's per-session cwd record on a fresh chat and binds the run's
+    # project-root/skills/AGENTS.md discovery. An in-chat ``cd`` keeps priority (the seed
+    # only fills an absent record); a missing directory warns and falls back to terminal.cwd.
+    cwd: Optional[str] = None
 
     def to_dict(self) -> dict[str, Any]:
         return {k: v for k, v in asdict(self).items() if v is not None}

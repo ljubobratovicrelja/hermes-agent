@@ -1314,6 +1314,54 @@ class TurnRunner(GatewayTurnProgressMixin, GatewaySessionAgentMixin):
         unique_tags = (["[[audio_as_voice]]"] if has_voice_directive else []) + list(dict.fromkeys(media_tags))
         return final_response + "\n" + "\n".join(unique_tags)
 
+    def _bind_channel_override_cwd(self):
+        """Apply this chat's ``channel_overrides.cwd`` (messaging sessions) for the run.
+
+        Called right after ``restore_turn_cwd`` so an in-chat ``cd`` (or a restored routing-entry
+        record) is already on the record: the seed only fills an absent one, keeping sticky-cd
+        semantics (/new clears the record; the next turn re-seeds from the channel config). The
+        logical cwd is then bound for the duration of the agent run so project-root discovery,
+        project skills and AGENTS.md/context files resolve to the channel's project. The override
+        is resolved through ``_channel_override`` — the same serving-profile route the turn's model
+        takes — never from ``os.environ``: a multiplexed router's launch-profile TERMINAL_CWD would
+        leak into routed profiles. A missing directory logs a warning and changes nothing; the
+        turn must never fail over a typo'd path. Returns the ``set_session_cwd`` token to reset in
+        the turn's ``finally``, or None when nothing was bound.
+        """
+        ctx = self._ctx
+        source = getattr(ctx, "source", None)
+        if source is None or not ctx.session_key:
+            return None
+        try:
+            override = self._runner._channel_override(
+                source.platform,
+                str(source.chat_id) if source.chat_id else "",
+                thread_id=str(source.thread_id) if getattr(source, "thread_id", None) else None,
+                parent_id=str(source.parent_chat_id) if getattr(source, "parent_chat_id", None) else None,
+                source=source,
+            )
+            raw = getattr(override, "cwd", None) if override is not None else None
+        except Exception as exc:  # health: allow BLE001 -- a config lookup must not fail the turn
+            logger.debug("channel cwd: override lookup for %s failed: %s", ctx.session_key, exc)
+            return None
+        raw = str(raw).strip() if isinstance(raw, str) else ""
+        if not raw:
+            return None
+        from pathlib import Path
+        expanded = Path(raw).expanduser()
+        if not expanded.is_dir():
+            logger.warning(
+                "channel_overrides cwd %r for %s chat %s is not an existing directory; "
+                "this chat falls back to the platform terminal.cwd",
+                raw, source.platform.value, source.chat_id,
+            )
+            return None
+        from tools.terminal_tool import get_session_cwd, record_session_cwd
+        if get_session_cwd(ctx.session_key) is None:
+            record_session_cwd(ctx.session_key, str(expanded))
+        from agent.runtime_cwd import set_session_cwd
+        return set_session_cwd(str(expanded))
+
     def run_sync(self):
         from contextlib import ExitStack
         from gateway.session_policy import bind_turn_workspace, policy_for_source, policy_scope, refused_turn_result
@@ -1333,9 +1381,13 @@ class TurnRunner(GatewayTurnProgressMixin, GatewaySessionAgentMixin):
                 bind_turn_workspace(policy, self._ctx.session_id)
                 from gateway.session_terminal_cwd import persist_turn_cwd, restore_turn_cwd
                 cwd_owner = restore_turn_cwd(self._runner, self._ctx.session_key, policy)
+                channel_cwd_token = self._bind_channel_override_cwd()
                 try:
                     result = self._run_sync_scoped()
                 finally:
+                    if channel_cwd_token is not None:
+                        from agent.runtime_cwd import reset_session_cwd
+                        reset_session_cwd(channel_cwd_token)
                     persist_turn_cwd(self._runner, self._ctx.session_key, cwd_owner)
             from gateway.session_results import execution_result
             captured = execution_result.get()

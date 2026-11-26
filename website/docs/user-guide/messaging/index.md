@@ -334,7 +334,7 @@ continuation, not the history loaded when you send a message.
 
 ## Per-Channel Model & System Prompt Overrides
 
-Different channels can run different models and personas from a **single gateway** — e.g. a cheap fast model in `#daily` and a frontier model with a specialist prompt in `#dev`. Configure `channel_overrides` under the platform in `~/.hermes/config.yaml`:
+Different channels can run different models, personas and working directories from a **single gateway** — e.g. a cheap fast model in `#daily` and a frontier model with a specialist prompt in `#dev`. Configure `channel_overrides` under the platform in `~/.hermes/config.yaml`:
 
 ```yaml
 platforms:
@@ -345,15 +345,17 @@ platforms:
         model: anthropic/claude-sonnet-4.6
         provider: anthropic
         system_prompt: "You are the #dev channel code-review specialist."
+        cwd: ~/dev/acme-analytics  # project root this chat's turns run in
       "987654321098765432":
         model: openai/gpt-5-mini
 ```
 
 Details:
 
-- `model`, `provider`, and `system_prompt` are optional. Unset fields fall back to the global defaults. A room can also set intentional silence with `allow_silence`, which overrides the platform's own `allow_silence` (below).
+- `model`, `provider`, `system_prompt`, and `cwd` are optional. Unset fields fall back to the global defaults. A room can also set intentional silence with `allow_silence`, which overrides the platform's own `allow_silence` (below).
 - Lookup order is exact channel/thread id first, then the **parent** channel/forum id — so Discord threads inherit their parent channel's override automatically.
 - Resolution priority for the model is: session `/model` override → `channel_overrides` → global config. A user running `/model` in a chat still wins over the channel default.
+- `cwd` pins the chat's working directory (``~`` expansion supported): project skills, `AGENTS.md` and project-root discovery resolve there, and a fresh chat's terminal commands start there. A `cd` made in the chat still wins for that conversation's life, and `/new` re-seeds from the channel config. Once a chat has seeded, editing the configured path applies to that chat only on the next `/new` — start a fresh conversation to pick up a changed value. A path that doesn't exist logs a warning and the chat falls back to the platform `terminal.cwd`.
 - The `system_prompt` override replaces the global gateway prompt for that channel (it is ephemeral — injected per turn, not stored in history).
 
 ## Per-Platform and Per-Room Intentional Silence
